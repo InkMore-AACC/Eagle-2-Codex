@@ -1,0 +1,3 @@
+# Keep published files and checksum manifests byte-identical on every platform.
+* -text
+*.zip binary

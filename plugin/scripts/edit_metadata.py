@@ -14,13 +14,15 @@ def save(hub,body):
  with hub.LOCK:
   i=hub.item(body.get('id',''))
   if 'expected' not in body or i.get(field)!=body['expected']:raise ValueError('这项内容已在别处修改，请关闭并重新打开后编辑。')
-  hub.eagle('v2/item/update' if field=='name' else 'item/update',{'id':i['id'],field:value})
-  updated=hub.item(i['id'])
-  for _ in range(15):
-   if updated.get(field)==value:break
-   time.sleep(.2)
+  try:
+   hub.eagle('v2/item/update' if field=='name' else 'item/update',{'id':i['id'],field:value})
    updated=hub.item(i['id'])
-  import browse_backend
-  with browse_backend._lock:browse_backend._cache=None
-  if updated.get(field)!=value:raise RuntimeError('Eagle 回读与提交内容不一致，请重新打开检查。')
-  return hub.brief(updated)
+   for _ in range(15):
+    if updated.get(field)==value:break
+    time.sleep(.2)
+    updated=hub.item(i['id'])
+   if updated.get(field)!=value:raise RuntimeError('Eagle 回读与提交内容不一致，请重新打开检查。')
+   return hub.brief(updated)
+  finally:
+   import browse_backend
+   with browse_backend._lock:browse_backend._cache=None

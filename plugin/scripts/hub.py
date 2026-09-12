@@ -1,8 +1,9 @@
 """Eagle library bridge. Standard-library only. Persistent data lives outside plugin cache."""
-import argparse, base64, hashlib, json, mimetypes, os, re, secrets, shutil, subprocess, sys, threading, time
+import argparse, base64, hashlib, json, mimetypes, os, re, secrets, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from urllib.parse import urlencode, urlparse, parse_qs
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -18,7 +19,13 @@ def read(name,default=None):
 def write(name,value):
  with LOCK:
   p=STATE/name; p.parent.mkdir(parents=True,exist_ok=True)
-  tmp=p.with_suffix('.tmp'); tmp.write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8'); tmp.replace(p)
+  tmp=None
+  try:
+   with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=p.parent,delete=False) as f:
+    tmp=Path(f.name);json.dump(value,f,ensure_ascii=False,indent=2);f.flush();os.fsync(f.fileno())
+   tmp.replace(p)
+  finally:
+   if tmp is not None:tmp.unlink(missing_ok=True)
 def eagle(endpoint,body=None,**params):
  url='http://127.0.0.1:41595/api/'+endpoint
  token=os.environ.get('EAGLE_API_TOKEN')
@@ -34,11 +41,12 @@ def library():
  if expected and os.path.normcase(value['library']['path'])!=os.path.normcase(expected):
   raise RuntimeError('Eagle 已切换资源库。请先切回已连接资源库，或明确要求重新连接。')
  return value
-def item(item_id):
+def item(item_id,lib=None):
  if not re.fullmatch(r'[A-Za-z0-9_-]+',item_id): raise ValueError('无效素材编号')
- library(); return eagle('item/info',id=item_id)
-def file_for(i,thumb=False):
- root=Path(library()['library']['path']).resolve()
+ if lib is None:library()
+ return eagle('item/info',id=item_id)
+def file_for(i,thumb=False,lib=None):
+ root=Path((lib if lib is not None else library())['library']['path']).resolve()
  folder=root/'images'/(i['id']+'.info')
  original=folder/(i['name']+'.'+i['ext'])
  p=original
@@ -81,30 +89,44 @@ def brief(i):return {k:i.get(k) for k in ['id','name','ext','tags','folders','wi
 def selection_key(task_id):
  if not isinstance(task_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,100}',task_id):raise ValueError('请从当前任务重新打开图库，缺少有效任务绑定')
  return 'selections/'+task_id+'.json'
-def selection_state(task_id):
- key=selection_key(task_id);path=library()['library']['path'];s=read(key,{'ids':[]})
+def selection_state(task_id,lib=None):
+ key=selection_key(task_id);path=(lib if lib is not None else library())['library']['path'];s=read(key,{'ids':[]})
  if s.get('libraryPath',path)!=path:raise ValueError('参考列表属于另一个 Eagle 库')
  return s
 def set_selection(task_id,ids):
  key=selection_key(task_id)
  if not isinstance(ids,list) or not all(isinstance(x,str) and x for x in ids) or len(set(ids))!=len(ids):raise ValueError('请选择不重复的有效素材')
- for x in ids:
-  if item(x).get('isDeleted'):raise ValueError('素材已移入废纸篓')
  with LOCK:
-  if ids:write(key,{'ids':ids,'selectedAt':time.time(),'libraryPath':library()['library']['path']})
+  lib=library();previous=set(selection_state(task_id,lib).get('ids',[]));added=[]
+  for x in ids:
+   if x in previous:continue
+   i=item(x,lib)
+   if i.get('isDeleted'):raise ValueError('素材已移入废纸篓')
+   added.append(brief(i))
+  if library()['library']['path']!=lib['library']['path']:raise ValueError('Eagle 资源库已切换，请重新选择')
+  if ids:write(key,{'ids':ids,'selectedAt':time.time(),'libraryPath':lib['library']['path']})
   else:(STATE/key).unlink(missing_ok=True)
- return {'ids':ids,'saved':True}
+ return {'ids':ids,'saved':True,'items':added}
 def selected(task_id=None):
  task_id=task_id or os.environ.get('CODEX_THREAD_ID')
- s=selection_state(task_id);out=[];errors=[]
+ lib=library();s=selection_state(task_id,lib);out=[];errors=[]
  for x in s.get('ids',[]):
   try:
-   i=item(x)
+   i=item(x,lib)
    if i.get('isDeleted'):raise ValueError('素材已移入废纸篓')
-   out.append(dict(brief(i),localImage=str(file_for(i))))
+   out.append(dict(brief(i),localImage=str(file_for(i,lib=lib))))
   except Exception as e:errors.append({'id':x,'error':str(e)})
+ if library()['library']['path']!=lib['library']['path']:raise ValueError('Eagle 资源库已切换，请重新读取')
  return {'taskId':task_id,'items':out,'errors':errors,'message':'请先在图库点击用作参考' if not out else '当前任务选中素材，可按用户要求读取、分析或创作；选中不触发任务'}
 def save_analysis(item_id,prompt,tags):
+ # All MCP writers are routed through the HTTP owner; serialize the full operation.
+ with LOCK:
+  try:return _save_analysis(item_id,prompt,tags)
+  finally:
+   import browse_backend
+   with browse_backend._lock:browse_backend._cache=None
+
+def _save_analysis(item_id,prompt,tags):
  if not prompt.strip() or not tags or not all(isinstance(t,str) and t.strip() for t in tags):raise ValueError('需要分析提示词和分类标签')
  i=item(item_id); fid=folder_id(); annotation='【图片分析提示词｜非作者原始提示词】\n'+prompt.strip()
  tags=list(dict.fromkeys(t.strip() for t in tags))
@@ -131,6 +153,7 @@ def save_analysis(item_id,prompt,tags):
     time.sleep(.5)
   if len(existing)!=1:raise RuntimeError('复制结果需要检查，不重复提交')
   copy_id=existing[0]['id'];copies[item_id]=copy_id;write('copies.json',copies)
+  eagle('item/update',{'id':copy_id,'annotation':annotation,'tags':tags})
  copied=item(copy_id)
  if fid not in copied['folders'] or copied['annotation']!=annotation or set(copied['tags'])!=set(tags):raise RuntimeError('参考副本回读验证失败')
  write('analysis/'+item_id+'.json',{'sourceId':item_id,'referenceId':copy_id,'prompt':prompt,'tags':tags,'savedAt':time.time()})
@@ -213,13 +236,17 @@ class Handler(BaseHTTPRequestHandler):
   try:
    if not self.valid_host() or self.headers.get('Origin') not in [None,BASE] or self.headers.get('X-Library-Token')!=self.server.csrf:return self.send({'error':'请求来源无效'},403)
    n=int(self.headers.get('Content-Length','0'))
-   if n>200000:return self.send({'error':'请求过大'},413)
+   limit=64*1024*1024 if self.path=='/api/save-analysis' else 1048576
+   if n<0 or n>limit:return self.send({'error':'请求过大'},413)
    body=json.loads(self.rfile.read(n))
    if self.path=='/api/edit':
     import edit_metadata
     return self.send(edit_metadata.save(sys.modules[__name__],body))
    if self.path=='/api/select':
     return self.send(set_selection(body.get('taskId'),body['ids']))
+   if self.path=='/api/save-analysis':
+    import analysis_store
+    return self.send(analysis_store.save(sys.modules[__name__],body))
    return self.send({'error':'not found'},404)
   except Exception as e:self.send({'error':str(e)},400)
 def serve():
@@ -245,8 +272,23 @@ TOOLS=[
  {'name':'library_open','description':'启动本地 Eagle 素材面板并返回 URL；随后用 Codex open_in_codex 在右侧打开。','inputSchema':{'type':'object','properties':{'taskId':{'type':'string','description':'当前 Codex 任务真实 ID，不得使用其他任务或猜测'}},'required':['taskId']}},
  {'name':'library_selected','description':'读取用户在库面板已选择的图片、原图路径、注释和分类标签。不会生成或修改素材。','inputSchema':{'type':'object','properties':{'taskId':{'type':'string','description':'当前 Codex 任务真实 ID，不得使用其他任务或猜测'}},'required':['taskId']}},
  {'name':'library_search','description':'按关键词和可选文件夹搜索 Eagle 素材，返回简要信息。','inputSchema':{'type':'object','properties':{'keyword':{'type':'string'},'folderId':{'type':'string'}},'required':['keyword']}},
- {'name':'library_save_analysis','description':'用户为选中图片授权后，覆盖原素材注释与分类标签，并复制独立参考素材到 image2.5参考；已有副本时更新。仅用于选中素材，不批量覆盖全库。','inputSchema':{'type':'object','properties':{'taskId':{'type':'string'},'itemId':{'type':'string'},'prompt':{'type':'string'},'tags':{'type':'array','items':{'type':'string'},'minItems':1}},'required':['taskId','itemId','prompt','tags']}}
+ {'name':'library_save_analysis','description':'反推提示词后先询问是否存入 Eagle；仅明确确认后调用。按图片内容拟定名称和分类标签，更新选中素材并维护 image2.5参考 副本，或导入外部本地图片。不会自动反推或生成。','inputSchema':{'type':'object','properties':{'taskId':{'type':'string'},'requestId':{'type':'string','description':'本次保存的唯一ID；同一次重试保持不变'},'confirmed':{'type':'boolean','const':True},'itemId':{'type':'string'},'imagePath':{'type':'string','description':'外部图片真实绝对路径，与itemId二选一'},'expected':{'type':'object','description':'更新已有素材时传最新读取的name/tags/annotation'},'name':{'type':'string'},'prompt':{'type':'string'},'tags':{'type':'array','items':{'type':'string'},'minItems':1}},'required':['taskId','requestId','confirmed','name','prompt','tags']}}
 ]
+
+def post(path,body):
+ try:
+  ensure_server()
+  with urlopen(BASE+'/api/status',timeout=120) as response:token=json.load(response)['csrf']
+  req=Request(BASE+path,data=json.dumps(body,ensure_ascii=False).encode(),headers={'Content-Type':'application/json','X-Library-Token':token})
+  with urlopen(req,timeout=120) as response:return json.load(response)
+ except HTTPError as e:
+  message=f'HTTP {e.code}: {e.reason}'
+  try:
+   payload=json.load(e)
+   if isinstance(payload,dict) and isinstance(payload.get('error'),str):message=payload['error']
+  except (ValueError,OSError):pass
+  finally:e.close()
+  raise RuntimeError(message) from e
 def call(name,a):
  if name=='library_open':
   task_id=a.get('taskId') or os.environ.get('CODEX_THREAD_ID');selection_key(task_id)
@@ -255,8 +297,9 @@ def call(name,a):
  if name=='library_search':
   library();return [{'id':i['id'],'name':i['name'],'tags':i['tags']} for i in eagle('item/list',keyword=a['keyword'],folders=a.get('folderId',''),limit=12)]
  if name=='library_save_analysis':
-  if a['itemId'] not in selection_state(a.get('taskId') or os.environ.get('CODEX_THREAD_ID')).get('ids',[]):raise ValueError('只能保存面板当前选中素材的分析')
-  return save_analysis(a['itemId'],a['prompt'],a['tags'])
+  import analysis_store
+  analysis_store.validate(a)
+  return post('/api/save-analysis',dict(a,taskId=a.get('taskId') or os.environ.get('CODEX_THREAD_ID')))
  raise ValueError('未知工具')
 def mcp():
  for line in sys.stdin:
