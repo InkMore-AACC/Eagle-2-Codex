@@ -83,15 +83,16 @@ def save(hub, body):
             if item_id not in hub.selection_state(body['taskId'], lib).get('ids', []):
                 raise ValueError('只能更新当前任务明确选中的 Eagle 素材。')
             row = hub.item(item_id, lib)
+            if hub.is_video('.'+row['ext']):raise ValueError('图片反推保存不接受视频；视频提示词请使用资料编辑')
             expected = body.get('expected')
             if not isinstance(expected, dict) or any(k not in expected or expected[k] != row.get(k) for k in ('name', 'tags', 'annotation')):
                 raise ValueError('名称、标签或提示词已变化，请重新读取后再确认保存。')
             if row.get('isDeleted'):
                 raise ValueError('素材已移入废纸篓。')
-            copy_id = hub.read('copies.json', {}).get(item_id)
+            copy_id = hub.analysis_copy_id(row,hub.folder_id())
             if copy_id and copy_id != item_id:
                 copied = hub.item(copy_id, lib)
-                if copied.get('isDeleted') or hub.folder_id() not in copied.get('folders', []):
+                if copied.get('isDeleted') or copied.get('ext')!=row.get('ext') or hub.folder_id() not in copied.get('folders', []):
                     raise ValueError('参考副本已删除或移出参考文件夹，请先核对 Eagle 中的副本。')
                 if any(copied.get(k) != row.get(k) for k in ('annotation', 'tags')):
                     raise ValueError('参考副本与原素材的注释或标签不同，请先核对，避免覆盖独立编辑。')
@@ -117,38 +118,43 @@ def save(hub, body):
             if image_bytes is not None:
                 record['imageHash'] = digest
             hub.write(key, record)
+        ids=[item_id] if image_bytes is None else []
+        if image_bytes is None:
+            known=hub.read('copies.json',{}).get(item_id)
+            if known:ids.append(known)
         try:
-            if image_bytes is None:
-                result = hub.save_analysis(item_id, prompt, tags)
-                ids = list(dict.fromkeys([result['sourceId'], result['referenceId']]))
-                rows = [_rename(hub, x, name) for x in ids]
-            else:
-                fid = hub.folder_id()
-                if not record.get('importId'):
-                    # Record intent before submission. An ambiguous failure never imports twice.
-                    added = hub.eagle('v2/item/add', {
-                        'base64': 'data:' + mime + ';base64,' + base64.b64encode(image_bytes).decode(),
-                        'name': name, 'tags': tags, 'folders': [fid],
-                        'annotation': '【图片分析提示词｜非作者原始提示词】\n' + prompt,
-                    })
-                    record['importId'] = added['id']
-                    hub.write(key, record)
-                row = _wait_item(hub, record['importId'])
-                if fid not in row.get('folders', []):
-                    raise RuntimeError('导入素材的文件夹回读不一致。')
-                if hashlib.sha256(hub.file_for(row).read_bytes()).hexdigest() != digest:
-                    raise RuntimeError('导入后的原图与源图片不一致。')
-                rows = [row]
-                result = {'sourceId': row['id'], 'referenceId': row['id']}
-            annotation = '【图片分析提示词｜非作者原始提示词】\n' + prompt
-            if any(r.get('isDeleted') or r.get('name') != name or r.get('annotation') != annotation or set(r.get('tags', [])) != set(tags) for r in rows):
-                raise RuntimeError('名称、标签或反推提示词回读不一致，请检查 Eagle。')
-            if hub.library()['library']['path'] != lib['library']['path']:
-                raise RuntimeError('保存期间 Eagle 切换了资源库，请核对保存结果。')
-            result.update(verified=True, requestId=body['requestId'], items=[hub.brief(r) for r in rows])
-            record['result'] = result
-            hub.write(key, record)
-            return result
+            with hub.metadata_guard(ids,{'name':name,'annotation':'【图片分析提示词｜非作者原始提示词】\n'+prompt,'tags':tags}):
+                if image_bytes is None:
+                    result = hub.save_analysis(item_id, prompt, tags)
+                    ids = list(dict.fromkeys([result['sourceId'], result['referenceId']]))
+                    rows = [_rename(hub, x, name) for x in ids]
+                else:
+                    fid = hub.folder_id()
+                    if not record.get('importId'):
+                        # Record intent before submission. An ambiguous failure never imports twice.
+                        added = hub.eagle('v2/item/add', {
+                            'base64': 'data:' + mime + ';base64,' + base64.b64encode(image_bytes).decode(),
+                            'name': name, 'tags': tags, 'folders': [fid],
+                            'annotation': '【图片分析提示词｜非作者原始提示词】\n' + prompt,
+                        })
+                        record['importId'] = added['id']
+                        hub.write(key, record)
+                    row = _wait_item(hub, record['importId'])
+                    if fid not in row.get('folders', []):
+                        raise RuntimeError('导入素材的文件夹回读不一致。')
+                    if hashlib.sha256(hub.file_for(row).read_bytes()).hexdigest() != digest:
+                        raise RuntimeError('导入后的原图与源图片不一致。')
+                    rows = [row]
+                    result = {'sourceId': row['id'], 'referenceId': row['id']}
+                annotation = '【图片分析提示词｜非作者原始提示词】\n' + prompt
+                if any(r.get('isDeleted') or r.get('name') != name or r.get('annotation') != annotation or set(r.get('tags', [])) != set(tags) for r in rows):
+                    raise RuntimeError('名称、标签或反推提示词回读不一致，请检查 Eagle。')
+                if hub.library()['library']['path'] != lib['library']['path']:
+                    raise RuntimeError('保存期间 Eagle 切换了资源库，请核对保存结果。')
+                result.update(verified=True, requestId=body['requestId'], items=[hub.brief(r) for r in rows])
+                record['result'] = result
+                hub.write(key, record)
+                return result
         finally:
             import browse_backend
             with browse_backend._lock:

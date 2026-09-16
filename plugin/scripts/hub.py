@@ -1,4 +1,7 @@
+from video_media import serve_media, is_video, playback_file, PreviewPending
 """Eagle library bridge. Standard-library only. Persistent data lives outside plugin cache."""
+from contextlib import contextmanager
+import copy
 import argparse, base64, hashlib, json, mimetypes, os, re, secrets, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -85,7 +88,7 @@ def all_items(**filters):
   out.extend(batch)
   if len(batch)<200:return out
  raise RuntimeError('结果过多，请缩小范围')
-def brief(i):return {k:i.get(k) for k in ['id','name','ext','tags','folders','width','height','annotation','url','modificationTime','size']}
+def brief(i):return {k:i.get(k) for k in ['id','name','ext','tags','folders','width','height','annotation','url','modificationTime','size','duration']}
 def selection_key(task_id):
  if not isinstance(task_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,100}',task_id):raise ValueError('请从当前任务重新打开图库，缺少有效任务绑定')
  return 'selections/'+task_id+'.json'
@@ -114,21 +117,68 @@ def selected(task_id=None):
   try:
    i=item(x,lib)
    if i.get('isDeleted'):raise ValueError('素材已移入废纸篓')
-   out.append(dict(brief(i),localImage=str(file_for(i,lib=lib))))
+   out.append(dict(brief(i),**{('localVideo' if is_video('.'+i['ext']) else 'localImage'):str(file_for(i,lib=lib))}))
   except Exception as e:errors.append({'id':x,'error':str(e)})
  if library()['library']['path']!=lib['library']['path']:raise ValueError('Eagle 资源库已切换，请重新读取')
  return {'taskId':task_id,'items':out,'errors':errors,'message':'请先在图库点击用作参考' if not out else '当前任务选中素材，可按用户要求读取、分析或创作；选中不触发任务'}
+@contextmanager
+def metadata_guard(ids,changes):
+ lib=library();before={x:copy.deepcopy(item(x,lib)) for x in dict.fromkeys(ids)}
+ try:yield
+ except Exception:
+  recovery=[]
+  for x,old in before.items():
+   try:
+    if library()['library']['path']!=lib['library']['path']:raise RuntimeError('资源库已切换，拒绝回滚到其他库')
+    now=item(x,lib);restore={}
+    for k,written in changes.items():
+     if now.get(k)==written and now.get(k)!=old.get(k):restore[k]=old.get(k)
+    if restore:
+     name=restore.pop('name',None)
+     if restore:eagle('item/update',dict(id=x,**restore))
+     if name is not None:eagle('v2/item/update',{'id':x,'name':name});restore['name']=name
+     check=item(x,lib)
+     if any(check.get(k)!=v for k,v in restore.items()):raise RuntimeError('回滚回读失败')
+    remaining=[k for k in changes if now.get(k)!=old.get(k) and now.get(k)!=changes[k]]
+    if remaining:recovery.append({'id':x,'preservedIndependentFields':remaining})
+   except Exception as error:recovery.append({'id':x,'rollbackError':str(error)})
+  if recovery:
+   try:write('analysis-recovery/'+str(time.time_ns())+'.json',{'libraryPath':lib['library']['path'],'items':recovery,'before':before})
+   except Exception:pass
+   if any('rollbackError' in r for r in recovery):raise RuntimeError('保存中断且部分回滚未确认；请查看 analysis-recovery 记录并核对 Eagle')
+  raise
+
+def analysis_copy_id(row,fid):
+ if fid in row.get('folders',[]):return row['id']
+ copies=read('copies.json',{});known=copies.get(row['id'])
+ if known:return known
+ name=row['name']+' · 参考 '+row['id']
+ existing=[x for x in all_items(folders=fid) if x['name']==name]
+ if len(existing)>1:raise ValueError('同名参考副本不唯一，拒绝覆盖')
+ if not existing:return None
+ raise ValueError('未登记的同名参考素材身份无法确认，拒绝自动覆盖；请先核对 Eagle')
+
 def save_analysis(item_id,prompt,tags):
  # All MCP writers are routed through the HTTP owner; serialize the full operation.
  with LOCK:
-  try:return _save_analysis(item_id,prompt,tags)
+  try:
+   row=item(item_id)
+   if is_video('.'+row['ext']):raise ValueError('图片反推保存不接受视频')
+   ids=[item_id];known=analysis_copy_id(row,folder_id())
+   if known:
+    copied=item(known)
+    if copied.get('isDeleted') or copied.get('ext')!=row.get('ext') or any(copied.get(k)!=row.get(k) for k in ('annotation','tags')):raise ValueError('参考副本已独立修改，拒绝覆盖')
+    ids.append(known)
+   with metadata_guard(ids,{'annotation':'【图片分析提示词｜非作者原始提示词】\n'+prompt.strip(),'tags':list(dict.fromkeys(t.strip() for t in tags))}):return _save_analysis(item_id,prompt,tags)
   finally:
    import browse_backend
    with browse_backend._lock:browse_backend._cache=None
 
 def _save_analysis(item_id,prompt,tags):
  if not prompt.strip() or not tags or not all(isinstance(t,str) and t.strip() for t in tags):raise ValueError('需要分析提示词和分类标签')
- i=item(item_id); fid=folder_id(); annotation='【图片分析提示词｜非作者原始提示词】\n'+prompt.strip()
+ i=item(item_id)
+ if is_video('.'+i['ext']):raise ValueError('图片反推保存不接受视频')
+ fid=folder_id(); annotation='【图片分析提示词｜非作者原始提示词】\n'+prompt.strip()
  tags=list(dict.fromkeys(t.strip() for t in tags))
  # User explicitly authorized replacement, not annotation append.
  eagle('item/update',{'id':item_id,'annotation':annotation,'tags':tags})
@@ -143,6 +193,7 @@ def _save_analysis(item_id,prompt,tags):
   name=i['name']+' · 参考 '+item_id
   # Reconcile a previous partial import before submitting a duplicate.
   existing=[x for x in all_items(folders=fid) if x['name']==name]
+  if existing:raise ValueError('未登记的同名参考素材，拒绝自动覆盖')
   if not existing:
    p=file_for(i)
    result=eagle('v2/item/add',{'base64':'data:'+(mimetypes.guess_type(p.name)[0] or 'application/octet-stream')+';base64,'+base64.b64encode(p.read_bytes()).decode(),'name':name,'website':i.get('url',''),'annotation':annotation,'tags':tags,'folders':[fid]})
@@ -204,8 +255,11 @@ class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args):pass
  def send(self,value,status=200,ctype='application/json; charset=utf-8'):
   raw=value if isinstance(value,bytes) else json.dumps(value,ensure_ascii=False).encode()
-  self.send_response(status);self.send_header('Content-Type',ctype);self.send_header('Content-Length',str(len(raw)));self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.end_headers();self.wfile.write(raw)
+  self.send_response(status);self.send_header('Content-Type',ctype);self.send_header('Content-Length',str(len(raw)));self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.end_headers();
+  if self.command!='HEAD':self.wfile.write(raw)
  def valid_host(self):return self.headers.get('Host')==f'127.0.0.1:{PORT}'
+ def do_HEAD(self):
+  self.do_GET()
  def do_GET(self):
   try:
    if not self.valid_host():return self.send({'error':'Host rejected'},403)
@@ -229,8 +283,11 @@ class Handler(BaseHTTPRequestHandler):
    if u.path=='/api/item':return self.send(brief(item(q['id'])))
    if u.path=='/media':
     i=item(q['id']);p=file_for(i,q.get('thumb')=='1')
-    return self.send(p.read_bytes(),ctype=mimetypes.guess_type(p.name)[0] or 'application/octet-stream')
+    if q.get('play')=='1' and q.get('thumb')!='1':p=playback_file(p,STATE/'video-cache',prepare=self.command!='HEAD')
+    return serve_media(self,p)
    return self.send({'error':'not found'},404)
+  except PreviewPending:
+   self.send_response(202);self.send_header('Content-Length','0');self.send_header('Retry-After','2');self.end_headers()
   except Exception as e:self.send({'error':str(e)},400)
  def do_POST(self):
   try:

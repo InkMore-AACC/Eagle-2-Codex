@@ -110,6 +110,60 @@ class AnalysisTests(unittest.TestCase):
         result=analysis_store.save(hub,body)
         self.assertTrue(result['verified']);self.assertEqual(self.calls.count('v2/item/add'),1)
 
+    def test_video_rejected_without_metadata_or_receipt_write(self):
+        self.rows['one']['ext']='mp4';before=copy.deepcopy(self.rows)
+        with self.assertRaisesRegex(ValueError,'不接受视频'):analysis_store.save(hub,self.body)
+        self.assertEqual(before,self.rows);self.assertNotIn('item/update',self.calls)
+        self.assertFalse((hub.STATE/'analysis-requests').exists())
+
+    def test_rename_failure_rolls_back_prompt_tags_and_name(self):
+        before=copy.deepcopy(self.rows)
+        with patch.object(analysis_store,'_rename',side_effect=OSError('rename failed')):
+            with self.assertRaises(OSError):analysis_store.save(hub,self.body)
+        self.assertEqual(self.rows,before)
+
+    def test_final_receipt_failure_restores_metadata(self):
+        before=copy.deepcopy(self.rows);real=hub.write
+        def fail(key,value):
+            if key.startswith('analysis-requests/') and value.get('result'):raise OSError('receipt failed')
+            return real(key,value)
+        with patch.object(hub,'write',side_effect=fail):
+            with self.assertRaises(OSError):analysis_store.save(hub,self.body)
+        self.assertEqual(self.rows,before)
+
+    def test_rollback_preserves_independent_edit(self):
+        before=copy.deepcopy(self.rows)
+        def fail(*args):
+            self.rows['one']['annotation']='concurrent manual edit'
+            raise OSError('rename failed')
+        with patch.object(analysis_store,'_rename',side_effect=fail):
+            with self.assertRaises(OSError):analysis_store.save(hub,self.body)
+        self.assertEqual(self.rows['one']['annotation'],'concurrent manual edit')
+        self.assertEqual(self.rows['one']['tags'],before['one']['tags'])
+
+    def test_reference_copy_failure_restores_source(self):
+        self.rows['one']['folders']=['outside'];before=copy.deepcopy(self.rows)
+        with patch.object(hub,'all_items',return_value=[]),patch.object(hub,'file_for',side_effect=OSError('copy failed')):
+            with self.assertRaises(OSError):analysis_store.save(hub,self.body)
+        self.assertEqual(self.rows,before)
+
+    def test_unregistered_edited_copy_rejected_before_source_write(self):
+        self.rows['one']['folders']=['outside']
+        self.rows['copy']=dict(self.row,id='copy',name='Original · 参考 one',annotation='manual copy edit')
+        before=copy.deepcopy(self.rows)
+        with patch.object(hub,'all_items',return_value=[self.rows['copy']]):
+            with self.assertRaisesRegex(ValueError,'拒绝自动覆盖'):analysis_store.save(hub,self.body)
+        self.assertEqual(self.rows,before);self.assertNotIn('item/update',self.calls)
+
+    def test_unregistered_matching_copy_never_reaches_rename(self):
+        self.rows['one']['folders']=['outside']
+        self.rows['copy']=dict(self.row,id='copy',name='Original · 参考 one')
+        before=copy.deepcopy(self.rows)
+        with patch.object(hub,'all_items',return_value=[self.rows['copy']]),patch.object(analysis_store,'_rename') as rename:
+            with self.assertRaisesRegex(ValueError,'拒绝自动覆盖'):analysis_store.save(hub,self.body)
+            rename.assert_not_called()
+        self.assertEqual(self.rows,before)
+
     def test_invalid_inputs_do_not_write(self):
         for extra in ({'name':'bad/name'},{'tags':[]},{'imagePath':str(self.source)}, {'prompt':''}):
             with self.subTest(extra=extra):

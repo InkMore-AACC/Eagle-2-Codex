@@ -60,10 +60,15 @@ class BridgeTests(unittest.TestCase):
 
     def test_edit_partial_failure_invalidates_cache(self):
         browse_backend._cache=('stale',0,[])
-        with patch.object(hub,'item',side_effect=[copy.deepcopy(self.row),OSError('lost response')]):
+        real=hub.item;reads=[]
+        def read(*args,**kwargs):
+            reads.append(1)
+            if len(reads)==3:raise OSError('lost response')
+            return real(*args,**kwargs)
+        with patch.object(hub,'item',side_effect=read):
             with self.assertRaises(OSError):edit_metadata.save(hub,{'id':'one','field':'annotation','expected':'old','value':'new'})
         self.assertIsNone(browse_backend._cache)
-        self.assertEqual(self.row['annotation'],'new')
+        self.assertEqual(self.row['annotation'],'old')
 
     def test_selection_only_validates_additions(self):
         hub.set_selection('test-task-123',['one']);self.api_calls.clear()
@@ -125,7 +130,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(len(copies),1);self.assertEqual(results[0]['referenceId'],results[1]['referenceId'])
         self.assertEqual(hub.read('copies.json')['one'],copies[0])
 
-    def test_recovered_copy_gets_current_analysis(self):
+    def test_unregistered_same_name_copy_is_not_overwritten(self):
         records={'one':dict(self.row,folders=['outside']),'copy':dict(self.row,id='copy',name='one · 参考 one')}
         def api(endpoint,body=None,**params):
             if endpoint=='library/info':return {'library':{'path':self.tmp.name}}
@@ -134,8 +139,9 @@ class BridgeTests(unittest.TestCase):
             if endpoint=='item/update':records[body['id']].update(body);return None
             raise AssertionError(endpoint)
         with patch.object(hub,'eagle',side_effect=api),patch.object(hub,'all_items',return_value=[copy.deepcopy(records['copy'])]):
-            result=hub.save_analysis('one','current',['current'])
-        self.assertTrue(result['verified']);self.assertIn('current',records['copy']['annotation'])
+            with self.assertRaisesRegex(ValueError,'拒绝自动覆盖'):hub.save_analysis('one','new analysis',['new'])
+        self.assertEqual(records['one']['annotation'],'old')
+        self.assertEqual(records['copy']['annotation'],'old')
 
     def test_selection_isolation_and_no_six_limit(self):
         ids=['item'+str(n) for n in range(20)]

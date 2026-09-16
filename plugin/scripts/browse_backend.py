@@ -39,7 +39,7 @@ def catalog(hub):
   rows=[]
   for i in hub.all_items():
    if i.get('isDeleted'):continue
-   row={k:i.get(k) for k in ('id','name','ext','tags','folders','width','height','modificationTime')}
+   row={k:i.get(k) for k in ('id','name','ext','tags','folders','width','height','modificationTime','duration')}
    row['annotation']=(i.get('annotation') or '')[:240]
    row['colors']=sorted({color_bucket(p['color']) for p in i.get('palettes',[]) if len(p.get('color',[]))==3 and p.get('ratio',0)>=5})
    row['palette']=[{'lab':color_match.lab(p['color']),'ratio':float(p['ratio'])} for p in i.get('palettes',[]) if len(p.get('color',[]))==3 and p.get('ratio',0)>0]
