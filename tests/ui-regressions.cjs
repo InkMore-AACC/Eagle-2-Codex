@@ -37,7 +37,7 @@ function cacheWorkingSet(){
 }
 async function detachedEdit(){
  let resolve;
- const c={editing:null,editBusy:false,api:()=>new Promise(r=>resolve=r),msg(){},document:{querySelector(){throw Error('unexpected lookup')}},detailSeq:0};
+ const c={editing:null,editBusy:false,stopCardVideos(){},api:()=>new Promise(r=>resolve=r),msg(){},document:{querySelector(){throw Error('unexpected lookup')}},detailSeq:0};
  vm.createContext(c);vm.runInContext(script.slice(script.indexOf('async function edit'),script.indexOf('const leaveDialog=')),c);
  const p=c.edit('one','name',{isConnected:false});resolve({id:'one'});await p;assert.equal(c.editing,null);
 }

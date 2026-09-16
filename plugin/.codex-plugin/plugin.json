@@ -1,15 +1,15 @@
 {
   "name": "library-hub",
-  "version": "1.0.0+codex.20260916133930",
-  "description": "\u5e93\uff1a\u5728 Codex \u53f3\u4fa7\u6d4f\u89c8 Eagle \u7d20\u6750\uff0c\u590d\u7528\u53c2\u8003\u56fe\u63d0\u793a\u8bcd\uff0c\u4fdd\u5b58\u5206\u6790\u4e0e\u5206\u7c7b\u3002",
+  "version": "1.0.0+codex.20260916140058",
+  "description": "库：在 Codex 右侧浏览 Eagle 素材，复用参考图提示词，保存分析与分类。",
   "author": {
     "name": "Local developer"
   },
   "skills": "./skills/",
   "interface": {
-    "displayName": "\u5e93 \u00b7 Eagle",
-    "shortDescription": "\u672c\u5730\u7d20\u6750\u3001\u5206\u7c7b\u4e0e\u63d0\u793a\u8bcd\uff0c\u9009\u56fe\u540e\u7ee7\u7eed\u521b\u4f5c",
-    "longDescription": "\u8fde\u63a5\u8fd0\u884c\u4e2d\u7684 Eagle\uff0c\u5728\u53f3\u4fa7\u7f51\u9875\u9762\u677f\u6d4f\u89c8\u3001\u641c\u7d22\u548c\u9009\u62e9\u7d20\u6750\u3002\u8bfb\u53d6\u63d0\u793a\u8bcd\u3001\u6309\u9700\u4fdd\u5b58\u56fe\u7247\u5206\u6790\u548c\u5206\u7c7b\uff0c\u5e76\u5c06\u53c2\u8003\u526f\u672c\u5b58\u5165 image2.5\u53c2\u8003\u3002\u6b64\u63d2\u4ef6\u4e0d\u4fee\u6539 Codex \u539f\u751f\u4fa7\u680f\uff0c\u4e5f\u4e0d\u5d4c\u5165\u5b8c\u6574 Eagle \u8f6f\u4ef6\u3002",
+    "displayName": "库 · Eagle",
+    "shortDescription": "本地素材、分类与提示词，选图后继续创作",
+    "longDescription": "连接运行中的 Eagle，在右侧网页面板浏览、搜索和选择素材。读取提示词、按需保存图片分析和分类，并将参考副本存入 image2.5参考。此插件不修改 Codex 原生侧栏，也不嵌入完整 Eagle 软件。",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [
@@ -17,8 +17,8 @@
       "Write"
     ],
     "defaultPrompt": [
-      "\u6253\u5f00\u5e93\uff0c\u5728\u53f3\u4fa7\u663e\u793a Eagle \u7d20\u6750\u9762\u677f",
-      "\u4f7f\u7528\u5e93\u91cc\u9009\u4e2d\u7684\u56fe\u7247\uff0c\u7ed3\u5408\u6211\u7684\u9700\u6c42\u751f\u6210\u56fe\u7247"
+      "打开库，在右侧显示 Eagle 素材面板",
+      "使用库里选中的图片，结合我的需求生成图片"
     ]
   },
   "mcpServers": "./.mcp.json"
