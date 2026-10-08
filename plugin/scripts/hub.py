@@ -1,3 +1,4 @@
+import codex_lifecycle
 from video_media import serve_media, is_video, playback_file, PreviewPending
 """Eagle library bridge. Standard-library only. Persistent data lives outside plugin cache."""
 from contextlib import contextmanager
@@ -12,7 +13,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 ROOT=Path(__file__).resolve().parents[1]
 STATE=Path(os.environ.get('LIBRARY_HUB_DATA',str(Path.home()/'Documents/Codex/LibraryData')))
 STATE.mkdir(parents=True,exist_ok=True)
-PORT=18765
+PORT=int(os.environ.get('LIBRARY_HUB_PORT','18765'))
 BASE=f'http://127.0.0.1:{PORT}'
 LOCK=threading.RLock()
 API_LOCK=threading.BoundedSemaphore(3)
@@ -307,8 +308,13 @@ class Handler(BaseHTTPRequestHandler):
    return self.send({'error':'not found'},404)
   except Exception as e:self.send({'error':str(e)},400)
 def serve():
- server=ThreadingHTTPServer(('127.0.0.1',PORT),Handler);server.csrf=secrets.token_urlsafe(32);server.serve_forever()
+ server=ThreadingHTTPServer(('127.0.0.1',PORT),Handler);server.csrf=secrets.token_urlsafe(32)
+ codex_lifecycle.watch_owners(server,STATE)
+ try:server.serve_forever()
+ finally:server.server_close()
 def ensure_server():
+ managed=codex_lifecycle.register_owner(STATE)
+ child_env={**os.environ,'CODEX_LIBRARY_MANAGED':'1' if managed else '0'}
  try:
   with urlopen(BASE+'/health',timeout=2) as r:
    if json.load(r).get('app')=='library-hub':return BASE
@@ -316,7 +322,7 @@ def ensure_server():
  except OSError:pass
  log=(STATE/'server.log').open('ab')
  flags=(subprocess.CREATE_NO_WINDOW|subprocess.DETACHED_PROCESS) if os.name=='nt' else 0
- subprocess.Popen([sys.executable,str(Path(__file__).resolve()),'serve'],stdin=subprocess.DEVNULL,stdout=log,stderr=log,creationflags=flags,start_new_session=os.name!='nt')
+ subprocess.Popen([sys.executable,str(Path(__file__).resolve()),'serve'],stdin=subprocess.DEVNULL,stdout=log,stderr=log,creationflags=flags,start_new_session=os.name!='nt',env=child_env)
  for _ in range(30):
   time.sleep(.1)
   try:
@@ -363,7 +369,9 @@ def mcp():
   try:
    m=json.loads(line);method=m.get('method');rid=m.get('id');params=m.get('params',{})
    if rid is None:continue
-   if method=='initialize':result={'protocolVersion':params.get('protocolVersion','2024-11-05'),'capabilities':{'tools':{}},'serverInfo':{'name':'library-hub','version':'1.0.0'}}
+   if method=='initialize':
+    codex_lifecycle.on_initialize(STATE,ensure_server)
+    result={'protocolVersion':params.get('protocolVersion','2024-11-05'),'capabilities':{'tools':{}},'serverInfo':{'name':'library-hub','version':'1.0.0'}}
    elif method=='tools/list':result={'tools':TOOLS}
    elif method=='ping':result={}
    elif method=='tools/call':
